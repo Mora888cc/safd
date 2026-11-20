@@ -1,0 +1,274 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local enabled = { Recoil = true, Spread = true, Sway = false }
+local ORDER = { "Recoil", "Spread", "Sway" }
+
+local CATEGORIES = {
+	Recoil = { "recoil", "kick", "aimpunch" },
+	Spread = { "spread", "bloom", "inaccuracy", "scatter", "dispersion", "deviation" },
+	Sway = { "sway" },
+}
+
+local EXCLUDE = { "reduction", "reduce", "recover", "recovery", "decay", "regen" }
+
+local entries = {}
+local processed = {}
+local counts = { Recoil = 0, Spread = 0, Sway = 0 }
+local statusLabel
+
+local function updateStatus()
+	if statusLabel then
+		statusLabel.Text = string.format("Found  R:%d  S:%d  W:%d", counts.Recoil, counts.Spread, counts.Sway)
+	end
+end
+
+local function isExcluded(name)
+	name = string.lower(name)
+	for _, bad in ipairs(EXCLUDE) do
+		if string.find(name, bad, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function categoryOf(name)
+	if isExcluded(name) then return nil end
+	name = string.lower(name)
+	for cat, words in pairs(CATEGORIES) do
+		for _, word in ipairs(words) do
+			if string.find(name, word, 1, true) then
+				return cat
+			end
+		end
+	end
+	return nil
+end
+
+local function isTweakable(value)
+	local t = typeof(value)
+	return t == "number" or t == "Vector3" or t == "Vector2"
+end
+
+local function zeroOf(value)
+	local t = typeof(value)
+	if t == "Vector3" then return Vector3.zero end
+	if t == "Vector2" then return Vector2.zero end
+	return 0
+end
+
+local function register(cat, old, set, label)
+	local entry = {
+		cat = cat,
+		label = label,
+		zero = function() pcall(set, zeroOf(old)) end,
+		restore = function() pcall(set, old) end,
+	}
+	table.insert(entries, entry)
+	counts[cat] += 1
+	updateStatus()
+	if enabled[cat] then
+		entry.zero()
+	end
+end
+
+local function scanTable(tbl, seen, inherited, path)
+	if seen[tbl] then return end
+	seen[tbl] = true
+	for key, value in pairs(tbl) do
+		local keyName = type(key) == "string" and key or nil
+		if not (keyName and isExcluded(keyName)) then
+			local cat = (keyName and categoryOf(keyName)) or inherited
+			local subPath = path .. "." .. tostring(key)
+			if type(value) == "table" then
+				scanTable(value, seen, cat, subPath)
+			elseif cat and isTweakable(value) then
+				register(cat, value, function(v) tbl[key] = v end, subPath)
+			end
+		end
+	end
+end
+
+local function processInstance(inst)
+	if processed[inst] then return end
+	processed[inst] = true
+
+	if inst:IsA("NumberValue") or inst:IsA("IntValue") or inst:IsA("Vector3Value") then
+		local cat = categoryOf(inst.Name)
+		if cat then
+			register(cat, inst.Value, function(v) inst.Value = v end, inst:GetFullName())
+		end
+	end
+
+	for name, value in pairs(inst:GetAttributes()) do
+		local cat = categoryOf(name)
+		if cat and isTweakable(value) then
+			register(cat, value, function(v) inst:SetAttribute(name, v) end, inst:GetFullName() .. "@" .. name)
+		end
+	end
+
+	if inst:IsA("ModuleScript") then
+		task.spawn(function()
+			local ok, result = pcall(require, inst)
+			if ok and type(result) == "table" then
+				local ok2, err = pcall(scanTable, result, {}, nil, inst:GetFullName())
+				if not ok2 then warn("[WeaponTweaks] " .. tostring(err)) end
+			end
+		end)
+	end
+end
+
+local function safeProcess(inst)
+	local ok, err = pcall(processInstance, inst)
+	if not ok then
+		warn("[WeaponTweaks] " .. tostring(err))
+	end
+end
+
+local function watch(root)
+	if not root then return end
+	safeProcess(root)
+	local descendants = root:GetDescendants()
+	for i, inst in ipairs(descendants) do
+		safeProcess(inst)
+		if i % 400 == 0 then task.wait() end
+	end
+	root.DescendantAdded:Connect(safeProcess)
+end
+
+local function setCategory(cat, state)
+	enabled[cat] = state
+	for _, entry in ipairs(entries) do
+		if entry.cat == cat then
+			if state then entry.zero() else entry.restore() end
+		end
+	end
+end
+
+local ON_COLOR = Color3.fromRGB(60, 170, 90)
+local OFF_COLOR = Color3.fromRGB(170, 60, 60)
+
+local oldGui = playerGui:FindFirstChild("WeaponTweaksGui")
+if oldGui then oldGui:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "WeaponTweaksGui"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 999
+gui.Parent = playerGui
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromOffset(190, 200)
+frame.Position = UDim2.new(0, 20, 0.5, -100)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Parent = gui
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 30)
+title.BackgroundTransparency = 1
+title.Text = "Weapon Tweaks"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 14
+title.Parent = frame
+
+for i, name in ipairs(ORDER) do
+	local button = Instance.new("TextButton")
+	button.Size = UDim2.new(1, -16, 0, 30)
+	button.Position = UDim2.new(0, 8, 0, 34 + (i - 1) * 36)
+	button.BackgroundColor3 = enabled[name] and ON_COLOR or OFF_COLOR
+	button.TextColor3 = Color3.new(1, 1, 1)
+	button.Font = Enum.Font.GothamMedium
+	button.TextSize = 14
+	button.Text = name .. ": " .. (enabled[name] and "ON" or "OFF")
+	button.Parent = frame
+	Instance.new("UICorner", button).CornerRadius = UDim.new(0, 6)
+
+	button.Activated:Connect(function()
+		local state = not enabled[name]
+		setCategory(name, state)
+		button.Text = name .. ": " .. (state and "ON" or "OFF")
+		button.BackgroundColor3 = state and ON_COLOR or OFF_COLOR
+	end)
+end
+
+statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -16, 0, 20)
+statusLabel.Position = UDim2.new(0, 8, 0, 144)
+statusLabel.BackgroundTransparency = 1
+statusLabel.TextColor3 = Color3.fromRGB(190, 190, 200)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 12
+statusLabel.Text = "Scanning..."
+statusLabel.Parent = frame
+
+local dumpButton = Instance.new("TextButton")
+dumpButton.Size = UDim2.new(1, -16, 0, 26)
+dumpButton.Position = UDim2.new(0, 8, 0, 168)
+dumpButton.BackgroundColor3 = Color3.fromRGB(55, 55, 65)
+dumpButton.TextColor3 = Color3.new(1, 1, 1)
+dumpButton.Font = Enum.Font.Gotham
+dumpButton.TextSize = 12
+dumpButton.Text = "Print found to Output"
+dumpButton.Parent = frame
+Instance.new("UICorner", dumpButton).CornerRadius = UDim.new(0, 6)
+
+dumpButton.Activated:Connect(function()
+	print("[WeaponTweaks] found settings: " .. #entries)
+	for _, entry in ipairs(entries) do
+		print(string.format("[%s] %s", entry.cat, entry.label))
+	end
+end)
+
+UserInputService.InputBegan:Connect(function(input, processedByUI)
+	if not processedByUI and input.KeyCode == Enum.KeyCode.RightShift then
+		frame.Visible = not frame.Visible
+	end
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(1)
+		for _, entry in ipairs(entries) do
+			if enabled[entry.cat] then
+				entry.zero()
+			end
+		end
+	end
+end)
+
+local roots = {
+	workspace,
+	ReplicatedStorage,
+	game:GetService("ReplicatedFirst"),
+	game:GetService("StarterPack"),
+	game:GetService("StarterPlayer"),
+}
+
+for _, root in ipairs(roots) do
+	task.spawn(watch, root)
+end
+
+task.spawn(function()
+	watch(player:WaitForChild("Backpack"))
+end)
+task.spawn(function()
+	watch(player:WaitForChild("PlayerScripts"))
+end)
+task.spawn(watch, playerGui)
+
+if player.Character then
+	task.spawn(watch, player.Character)
+end
+player.CharacterAdded:Connect(function(character)
+	task.spawn(watch, character)
+end)
